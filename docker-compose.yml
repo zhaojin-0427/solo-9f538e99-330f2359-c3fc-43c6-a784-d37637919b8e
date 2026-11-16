@@ -9,6 +9,10 @@ services:
       - eco_data:/data
     environment:
       ECO_DB_PATH: /data/eco.db
+      ECO_SOURCE_URL: http://eco-source:9001/pages
+    depends_on:
+      eco-source:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
@@ -16,6 +20,27 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  # 本地分类中心分页源：可换版、可断流，供 /docs 演示采集与续拉。
+  eco-source:
+    build:
+      context: .
+      dockerfile: Dockerfile.source
+    image: eco-mock-source:1.0.0
+    container_name: eco-mock-source
+    ports:
+      - "9001:9001"
+    environment:
+      SOURCE_PORT: "9001"
+      SOURCE_PAGE_SIZE: "3"
+      SOURCE_VERSION: "2026-11-16.v1"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9001/health', timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
 
 volumes:
   eco_data:

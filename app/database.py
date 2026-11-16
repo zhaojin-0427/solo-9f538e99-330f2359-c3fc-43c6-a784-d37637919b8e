@@ -68,6 +68,38 @@ CREATE TABLE IF NOT EXISTS result_item (
     reason           TEXT,
     PRIMARY KEY (result_id, line_no)
 );
+
+-- 采集任务：固定起始时的分类表修订，逐页确认后持久化游标。
+-- status: in_progress（仍在拉取）/ ready（到齐待发布）/ completed（已发布）/ rejected（拒绝发布）
+CREATE TABLE IF NOT EXISTS acquisition (
+    acquisition_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_url            TEXT NOT NULL,
+    note                  TEXT,
+    status                TEXT NOT NULL CHECK (
+                              status IN ('in_progress', 'ready', 'completed', 'rejected')
+                          ),
+    base_revision_id      INTEGER,
+    version               TEXT,
+    next_cursor           TEXT,
+    published_revision_id INTEGER REFERENCES taxonomy_revision(revision_id),
+    error_code            TEXT,
+    error_detail          TEXT,
+    created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- 已确认页：每页在独立事务中落盘后才推进游标，重启/断网后可原样续拉。
+CREATE TABLE IF NOT EXISTS acquisition_page (
+    acquisition_id INTEGER NOT NULL REFERENCES acquisition(acquisition_id) ON DELETE CASCADE,
+    page_no        INTEGER NOT NULL,
+    request_cursor TEXT,
+    next_cursor    TEXT,
+    version        TEXT NOT NULL,
+    accepted_names TEXT NOT NULL,  -- JSON 数组
+    synonym_edges  TEXT NOT NULL,  -- JSON 数组 [{"synonym":...,"target":...}]
+    confirmed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (acquisition_id, page_no)
+);
 """
 
 

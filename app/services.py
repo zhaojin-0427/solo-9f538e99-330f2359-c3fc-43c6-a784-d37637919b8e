@@ -16,6 +16,33 @@ class NotFoundError(Exception):
     """404：引用的批次或修订不存在。"""
 
 
+MAX_SYNONYM_EDGES = 40
+
+
+def validate_taxonomy_data(
+    accepted_names: list[str], synonym_edges: list[tuple[str, str]]
+) -> None:
+    """分类表整版校验：人工提交与采集发布共用同一套规则。"""
+    if not accepted_names:
+        raise ConflictError("接受名列表不能为空")
+    seen_names: set[str] = set()
+    for name in accepted_names:
+        if name in seen_names:
+            raise ConflictError(f"接受名重复：{name}")
+        seen_names.add(name)
+
+    if len(synonym_edges) > MAX_SYNONYM_EDGES:
+        raise ConflictError(
+            f"同义名指向关系至多 {MAX_SYNONYM_EDGES} 条，当前 {len(synonym_edges)} 条"
+        )
+    seen_edges: set[tuple[str, str]] = set()
+    for synonym, target in synonym_edges:
+        key = (synonym, target)
+        if key in seen_edges:
+            raise ConflictError(f"同义名指向关系重复：{synonym} -> {target}")
+        seen_edges.add(key)
+
+
 # ---------- 观测批次 ----------
 
 def create_batch(conn: sqlite3.Connection, payload: BatchCreate) -> int:
@@ -70,49 +97,59 @@ def list_observations(conn: sqlite3.Connection, batch_id: int) -> list[sqlite3.R
 def create_taxonomy_revision(
     conn: sqlite3.Connection, payload: TaxonomyCreate
 ) -> int:
-    seen_names: set[str] = set()
-    for name in payload.accepted_names:
-        if name in seen_names:
-            raise ConflictError(f"接受名重复：{name}")
-        seen_names.add(name)
-
-    seen_edges: set[tuple[str, str]] = set()
-    for edge in payload.synonym_edges:
-        key = (edge.synonym, edge.target)
-        if key in seen_edges:
-            raise ConflictError(f"同义名指向关系重复：{edge.synonym} -> {edge.target}")
-        seen_edges.add(key)
-
+    validate_taxonomy_data(
+        payload.accepted_names,
+        [(e.synonym, e.target) for e in payload.synonym_edges],
+    )
     with immediate_tx(conn):
-        cur = conn.execute(
-            "INSERT INTO taxonomy_revision(note) VALUES (?)", (payload.note,)
+        return insert_taxonomy_revision(
+            conn,
+            payload.accepted_names,
+            [(e.synonym, e.target) for e in payload.synonym_edges],
+            payload.note,
         )
-        revision_id = cur.lastrowid
-        conn.executemany(
-            "INSERT INTO accepted_name(revision_id, name) VALUES (?, ?)",
-            [(revision_id, name) for name in payload.accepted_names],
-        )
-        conn.executemany(
-            "INSERT INTO synonym_edge(revision_id, synonym, target) VALUES (?, ?, ?)",
-            [(revision_id, e.synonym, e.target) for e in payload.synonym_edges],
-        )
-        # 整版更正：旧修订标记 superseded，引用旧修订的有效结果立即过期
-        conn.execute(
-            """
-            UPDATE taxonomy_revision
-               SET superseded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE revision_id != ? AND superseded_at IS NULL
-            """,
-            (revision_id,),
-        )
-        conn.execute(
-            """
-            UPDATE result
-               SET status = 'expired'
-             WHERE status = 'active' AND revision_id != ?
-            """,
-            (revision_id,),
-        )
+
+
+def insert_taxonomy_revision(
+    conn: sqlite3.Connection,
+    accepted_names: list[str],
+    synonym_edges: list[tuple[str, str]],
+    note: str | None,
+) -> int:
+    """在调用方事务内写入一个新修订，并使旧修订/旧结果过期。
+
+    采集发布需要与「首次发布前分类表未被其他操作更正过」的检查处于
+    同一事务，因此把「校验 -> 写修订 -> 过期」拆成可复用的纯写入步骤。
+    """
+    cur = conn.execute(
+        "INSERT INTO taxonomy_revision(note) VALUES (?)", (note,)
+    )
+    revision_id = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO accepted_name(revision_id, name) VALUES (?, ?)",
+        [(revision_id, name) for name in accepted_names],
+    )
+    conn.executemany(
+        "INSERT INTO synonym_edge(revision_id, synonym, target) VALUES (?, ?, ?)",
+        [(revision_id, synonym, target) for synonym, target in synonym_edges],
+    )
+    # 整版更正：旧修订标记 superseded，引用旧修订的有效结果立即过期
+    conn.execute(
+        """
+        UPDATE taxonomy_revision
+           SET superseded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE revision_id != ? AND superseded_at IS NULL
+        """,
+        (revision_id,),
+    )
+    conn.execute(
+        """
+        UPDATE result
+           SET status = 'expired'
+         WHERE status = 'active' AND revision_id != ?
+        """,
+        (revision_id,),
+    )
     return revision_id
 
 

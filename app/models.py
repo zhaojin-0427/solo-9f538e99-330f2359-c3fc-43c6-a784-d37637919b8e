@@ -59,6 +59,65 @@ class ResultCreate(BaseModel):
     revision_id: int | None = Field(None, description="分类表修订 ID，缺省使用当前最新修订")
 
 
+class AcquisitionCreate(BaseModel):
+    source_url: str | None = Field(
+        None,
+        description="分类中心分页源地址，缺省使用 ECO_SOURCE_URL 环境变量",
+    )
+    note: str | None = Field(None, description="备注")
+
+    @field_validator("source_url")
+    @classmethod
+    def _strip_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().rstrip("/")
+        if not v:
+            raise ValueError("source_url 不能为空")
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("source_url 必须是 http(s) 地址")
+        return v
+
+
+# ---------- 分页源模型 ----------
+
+class SourceEdge(BaseModel):
+    synonym: str = Field(..., min_length=1)
+    target: str = Field(..., min_length=1)
+
+    @field_validator("synonym", "target")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return _non_empty(v)
+
+
+class SourcePage(BaseModel):
+    """HTTP 分页源单页返回：版号 + 接受名 + 同义关系 + 下一页游标。"""
+
+    version: str = Field(..., min_length=1, description="整版版号，跨页必须一致")
+    accepted_names: list[str] = Field(default_factory=list)
+    synonym_edges: list[SourceEdge] = Field(default_factory=list)
+    next_cursor: str | None = Field(None, description="下一页游标；null 表示最后一页")
+
+    @field_validator("version")
+    @classmethod
+    def _strip_version(cls, v: str) -> str:
+        return _non_empty(v)
+
+    @field_validator("accepted_names")
+    @classmethod
+    def _strip_names(cls, values: list[str]) -> list[str]:
+        return [_non_empty(v) for v in values]
+
+    @field_validator("next_cursor")
+    @classmethod
+    def _strip_cursor(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
 # ---------- 响应模型 ----------
 
 class ObservationOut(BaseModel):
@@ -129,3 +188,35 @@ class ResultSummaryOut(BaseModel):
 
 class ResultDetailOut(ResultSummaryOut):
     items: list[ResultItemOut]
+
+
+class AcquisitionPageOut(BaseModel):
+    page_no: int
+    request_cursor: str | None
+    next_cursor: str | None
+    version: str
+    accepted_count: int
+    edge_count: int
+    confirmed_at: str
+
+
+class AcquisitionSummaryOut(BaseModel):
+    acquisition_id: int
+    source_url: str
+    note: str | None
+    status: str
+    base_revision_id: int | None
+    version: str | None
+    next_cursor: str | None
+    pages_confirmed: int
+    accepted_count: int
+    edge_count: int
+    published_revision_id: int | None
+    error_code: str | None
+    error_detail: str | None
+    created_at: str
+    updated_at: str
+
+
+class AcquisitionOut(AcquisitionSummaryOut):
+    pages: list[AcquisitionPageOut]

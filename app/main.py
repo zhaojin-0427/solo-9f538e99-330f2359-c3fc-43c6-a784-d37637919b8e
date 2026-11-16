@@ -9,9 +9,12 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlite3 import Connection
 
-from . import services
+from . import acquisition, services
 from .database import connect, init_db
 from .models import (
+    AcquisitionCreate,
+    AcquisitionOut,
+    AcquisitionSummaryOut,
     BatchCreate,
     BatchOut,
     BatchSummaryOut,
@@ -251,3 +254,78 @@ def get_result(result_id: int, conn: Connection = Depends(get_conn)):
     if services.get_result(conn, result_id) is None:
         raise HTTPException(status_code=404, detail=f"供数结果不存在：result_id={result_id}")
     return _row_to_result_detail(conn, result_id)
+
+
+# ---------- 分类中心采集 ----------
+
+def _acquisition_out(conn: Connection, acquisition_id: int) -> AcquisitionOut:
+    view = acquisition.acquisition_view(conn, acquisition_id)
+    if view is None:
+        raise HTTPException(
+            status_code=404, detail=f"采集任务不存在：acquisition_id={acquisition_id}"
+        )
+    return AcquisitionOut(**view)
+
+
+@app.post(
+    "/acquisitions",
+    response_model=AcquisitionOut,
+    status_code=201,
+    tags=["分类中心采集"],
+    summary="新建采集：自动逐页拉取，可断点续拉",
+    description=(
+        "创建采集任务并立即尝试从分类中心分页源拉取。"
+        "每页确认后即持久化，断网或重启后已确认页与游标仍保留；"
+        "全部页到齐且版号一致、通过整版校验后才发布新修订并让旧供数过期。"
+    ),
+)
+def create_acquisition(
+    payload: AcquisitionCreate, conn: Connection = Depends(get_conn)
+):
+    acquisition_id = acquisition.create_acquisition(conn, payload)
+    return _acquisition_out(conn, acquisition_id)
+
+
+@app.post(
+    "/acquisitions/{acquisition_id}/continue",
+    response_model=AcquisitionOut,
+    tags=["分类中心采集"],
+    summary="继续采集（从上次确认的游标续拉；已完成的返回同一修订）",
+)
+def continue_acquisition(
+    acquisition_id: int, conn: Connection = Depends(get_conn)
+):
+    if acquisition.get_acquisition(conn, acquisition_id) is None:
+        raise HTTPException(
+            status_code=404, detail=f"采集任务不存在：acquisition_id={acquisition_id}"
+        )
+    try:
+        acquisition.continue_acquisition(conn, acquisition_id)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return _acquisition_out(conn, acquisition_id)
+
+
+@app.get(
+    "/acquisitions",
+    response_model=list[AcquisitionSummaryOut],
+    tags=["分类中心采集"],
+    summary="列出采集任务",
+)
+def list_acquisitions(conn: Connection = Depends(get_conn)):
+    summaries = []
+    for row in acquisition.list_acquisition_rows(conn):
+        view = acquisition.acquisition_view(conn, row["acquisition_id"])
+        view.pop("pages", None)
+        summaries.append(AcquisitionSummaryOut(**view))
+    return summaries
+
+
+@app.get(
+    "/acquisitions/{acquisition_id}",
+    response_model=AcquisitionOut,
+    tags=["分类中心采集"],
+    summary="查询采集进度、已确认页与发布结果",
+)
+def get_acquisition(acquisition_id: int, conn: Connection = Depends(get_conn)):
+    return _acquisition_out(conn, acquisition_id)
